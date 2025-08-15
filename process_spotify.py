@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 import matplotlib.pyplot as plt
 from pathlib import Path
 import seaborn as sns
+from torch.utils.data import TensorDataset, DataLoader
 
 
 df_plot = pd.read_csv("SpotifyFeatures.csv", low_memory=False)
@@ -18,26 +19,22 @@ print(df.head())
 
 base_features = [
     'acousticness', 'danceability', 'duration_ms', 'energy', 'instrumentalness',
-    'liveness', 'loudness', 'speechiness', 'tempo', 'valence', 'key', 'mode', 'time_signature'
-]
+    'liveness', 'loudness', 'speechiness', 'tempo', 'valence', 'key', 'mode', 'time_signature']
 target = 'popularity'
 
 df = df[base_features + [target]].copy()
 
-# Mode: "Major"/"Minor" -> 1/0 (if text)
 if df['mode'].dtype == 'O':
     df['mode'] = df['mode'].map({'Minor': 0, 'Major': 1})
 
 df = pd.get_dummies(df, columns=['key'], prefix='key', drop_first=True)
 
-# Time_signature like "4/4" -> take numerator 4
 df['time_signature'] = df['time_signature'].astype(str).str.split('/').str[0]
 df['time_signature'] = pd.to_numeric(df['time_signature'], errors='coerce')
 
 # Build final feature list
 features = [c for c in df.columns if c != target]
 
-# Coerce to numeric and fill missing
 df[features] = df[features].apply(pd.to_numeric, errors='coerce')
 df[features] = df[features].fillna(df[features].median(numeric_only=True))
 df[target] = pd.to_numeric(df[target], errors='coerce').fillna(df[target].median())
@@ -48,22 +45,14 @@ after = len(df)
 print(f"Rows after cleaning: {after} (dropped {before - after})")
 
 # Scale + split
-from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import train_test_split
-
 scaler = StandardScaler()
 X = scaler.fit_transform(df[features].values)
 y = df[target].values
 
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-import torch
-import torch.nn as nn
-from torch.utils.data import TensorDataset, DataLoader
 
-device = torch.device("mps" if torch.backends.mps.is_available()
-                      else "cuda" if torch.cuda.is_available()
-                      else "cpu")
+device = torch.device("mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu")
 print("Using device:", device)
 
 X_train_t = torch.tensor(X_train, dtype=torch.float32)
@@ -81,8 +70,7 @@ class SpotifyNet(nn.Module):
         self.net = nn.Sequential(
             nn.Linear(input_size, 64), nn.ReLU(),
             nn.Linear(64, 32), nn.ReLU(),
-            nn.Linear(32, 1)
-        )
+            nn.Linear(32, 1))
     def forward(self, x): return self.net(x)
 
 model = SpotifyNet(input_size=X_train.shape[1]).to(device)
@@ -148,9 +136,7 @@ plt.figure(figsize=(8,6))
 sns.scatterplot(
     x='danceability', y='energy',
     hue='genre',
-    data=df_plot[df_plot['genre'].isin(top10_genres)],
-    alpha=0.6, legend='brief'
-)
+    data=df_plot[df_plot['genre'].isin(top10_genres)], alpha=0.6, legend='brief')
 plt.title("Danceability vs Energy (Top 10 Genres)")
 plt.legend(bbox_to_anchor=(1.02, 1), loc='upper left')
 plt.tight_layout(); plt.savefig(out / "dance_vs_energy_by_genre.png", dpi=150); plt.close()
@@ -181,8 +167,7 @@ plt.tight_layout(); plt.savefig(out / "danceability_vs_energy_hex.png", dpi=150)
 heat_cols = [
     "popularity","acousticness","danceability","duration_ms","energy",
     "instrumentalness","liveness","loudness","speechiness","tempo",
-    "valence","mode","time_signature"
-]
+    "valence","mode","time_signature"]
 heat_cols = [c for c in heat_cols if c in df.columns]
 corr = df[heat_cols].corr()
 
