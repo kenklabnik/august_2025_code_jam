@@ -8,184 +8,190 @@ from sklearn.preprocessing import StandardScaler
 import matplotlib.pyplot as plt
 import matplotlib.pyplot as plt
 from pathlib import Path
+import seaborn as sns
+
+
+df_plot = pd.read_csv("SpotifyFeatures.csv", low_memory=False)
 
 df = pd.read_csv("SpotifyFeatures.csv", low_memory=False)
 print(df.head())
 
-features = ['acousticness','danceability','duration_ms','energy','instrumentalness',
-            'liveness','loudness','speechiness','tempo','valence','key','mode','time_signature']
-target = ['popularity']
+base_features = [
+    'acousticness', 'danceability', 'duration_ms', 'energy', 'instrumentalness',
+    'liveness', 'loudness', 'speechiness', 'tempo', 'valence', 'key', 'mode', 'time_signature'
+]
+target = 'popularity'
 
-df = df[features + target].dropna()
+df = df[base_features + [target]].copy()
 
+# Mode: "Major"/"Minor" -> 1/0 (if text)
 if df['mode'].dtype == 'O':
     df['mode'] = df['mode'].map({'Minor': 0, 'Major': 1})
 
-#One-hot encode the 'key' column
 df = pd.get_dummies(df, columns=['key'], prefix='key', drop_first=True)
 
-df = df.dropna(subset=features + ['popularity'])
+# Time_signature like "4/4" -> take numerator 4
+df['time_signature'] = df['time_signature'].astype(str).str.split('/').str[0]
+df['time_signature'] = pd.to_numeric(df['time_signature'], errors='coerce')
 
+# Build final feature list
+features = [c for c in df.columns if c != target]
+
+# Coerce to numeric and fill missing
+df[features] = df[features].apply(pd.to_numeric, errors='coerce')
+df[features] = df[features].fillna(df[features].median(numeric_only=True))
+df[target] = pd.to_numeric(df[target], errors='coerce').fillna(df[target].median())
+
+before = len(df)
+df = df.dropna(subset=features + [target])
+after = len(df)
+print(f"Rows after cleaning: {after} (dropped {before - after})")
+
+# Scale + split
 from sklearn.preprocessing import StandardScaler
-
-features = [col for col in df.columns if col not in ['popularity', 'track_name', 'artist_name']]
+from sklearn.model_selection import train_test_split
 
 scaler = StandardScaler()
-X = scaler.fit_transform(df[features])
+X = scaler.fit_transform(df[features].values)
 y = df[target].values
 
-#Train/test split
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-#Dataset Class
-class SpotifyDataset(Dataset):
-    def __init__(self, X, y):
-        self.X = torch.tensor(X, dtype=torch.float32)
-        self.y = torch.tensor(y, dtype=torch.float32)
+import torch
+import torch.nn as nn
+from torch.utils.data import TensorDataset, DataLoader
 
-    def __len__(self):
-        return len(self.X)
+device = torch.device("mps" if torch.backends.mps.is_available()
+                      else "cuda" if torch.cuda.is_available()
+                      else "cpu")
+print("Using device:", device)
 
-    def __getitem__(self, idx):
-        return self.X[idx], self.y[idx]
+X_train_t = torch.tensor(X_train, dtype=torch.float32)
+y_train_t = torch.tensor(y_train.reshape(-1, 1), dtype=torch.float32)
+X_test_t  = torch.tensor(X_test,  dtype=torch.float32)
+y_test_t  = torch.tensor(y_test.reshape(-1, 1),  dtype=torch.float32)
 
-train_data = SpotifyDataset(X_train, y_train)
-test_data = SpotifyDataset(X_test, y_test)
+train_loader = DataLoader(TensorDataset(X_train_t, y_train_t), batch_size=64, shuffle=True)
+test_loader  = DataLoader(TensorDataset(X_test_t,  y_test_t),  batch_size=64, shuffle=False)
 
-train_loader = DataLoader(train_data, batch_size=64, shuffle=True)
-test_loader = DataLoader(test_data, batch_size=64, shuffle=False)
-
-
+#Model
 class SpotifyNet(nn.Module):
     def __init__(self, input_size):
         super().__init__()
-        self.fc1 = nn.Linear(input_size, 64)
-        self.relu = nn.ReLU()
-        self.fc2 = nn.Linear(64, 32)
-        self.fc3 = nn.Linear(32, 1)
+        self.net = nn.Sequential(
+            nn.Linear(input_size, 64), nn.ReLU(),
+            nn.Linear(64, 32), nn.ReLU(),
+            nn.Linear(32, 1)
+        )
+    def forward(self, x): return self.net(x)
 
-    def forward(self, x):
-        x = self.relu(self.fc1(x))
-        x = self.relu(self.fc2(x))
-        return self.fc3(x)
+model = SpotifyNet(input_size=X_train.shape[1]).to(device)
 
-model = SpotifyNet(input_size=len(features))
-
-#Training
 criterion = nn.MSELoss()
-optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 epochs = 20
 
 for epoch in range(epochs):
     model.train()
-    running_loss = 0
-    for X_batch, y_batch in train_loader:
+    running = 0.0
+    for xb, yb in train_loader:
+        xb, yb = xb.to(device), yb.to(device)
         optimizer.zero_grad()
-        outputs = model(X_batch)
-        loss = criterion(outputs, y_batch)
+        pred = model(xb)
+        loss = criterion(pred, yb)
         loss.backward()
         optimizer.step()
-        running_loss += loss.item()
-    print(f"Epoch {epoch+1}/{epochs}, Loss: {running_loss/len(train_loader):.4f}")
+        running += loss.item()
+    print(f"Epoch {epoch+1}/{epochs} | train MSE: {running/len(train_loader):.4f}")
 
-#Evaluation
 model.eval()
-predictions, actuals = [], []
+preds, acts = [], []
 with torch.no_grad():
-    for X_batch, y_batch in test_loader:
-        preds = model(X_batch)
-        predictions.extend(preds.numpy().flatten())
-        actuals.extend(y_batch.numpy().flatten())
+    for xb, yb in test_loader:
+        xb = xb.to(device)
+        out = model(xb).cpu().numpy().flatten()
+        preds.extend(out)
+        acts.extend(yb.numpy().flatten())
 
-predictions = np.array(predictions)
-actuals = np.array(actuals)
+preds = np.array(preds)
+acts = np.array(acts)
+rmse = np.sqrt(((preds - acts) ** 2).mean())
+mae = np.abs(preds - acts).mean()
+print(f"Test RMSE: {rmse:.2f} | MAE: {mae:.2f}")
 
-rmse = np.sqrt(np.mean((predictions - actuals)**2))
-mae = np.mean(np.abs(predictions - actuals))
-print(f"RMSE: {rmse:.2f}, MAE: {mae:.2f}")
-
-#Plot
-plt.scatter(actuals, predictions, alpha=0.5)
-plt.xlabel("Actual Popularity")
-plt.ylabel("Predicted Popularity")
-plt.title("Predicted vs Actual Popularity")
-plt.plot([0, 100], [0, 100], '--', color='red')
-plt.show()
-
-#Top 10 genres
-top10_genres = df['genre'].value_counts().head(10).index
-df_top10 = df[df['genre'].isin(top10_genres)]
-
-plt.figure(figsize=(12,6))
-sns.boxplot(x='genre', y='popularity', data=df_top10, palette='Set3')
-plt.title("Popularity Distribution by Top 10 Genres")
-plt.xticks(rotation=45, ha='right')
-plt.show()
-
-plt.figure(figsize=(8,6))
-sns.scatterplot(
-    x='danceability',
-    y='energy',
-    hue='genre',
-    data=df[df['genre'].isin(top10_genres)],
-    alpha=0.6
-)
-plt.title("Danceability vs Energy (Top 10 Genres)")
-plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-plt.show()
+# Save model + scaler
+torch.save(model.state_dict(), "spotifynet.pt")
+import joblib; joblib.dump(scaler, "scaler.joblib")
+print("Saved model -> spotifynet.pt; scaler -> scaler.joblib")
 
 out = Path("figures"); out.mkdir(exist_ok=True)
 
-#Popularity distribution
+# Pred vs Actual
+plt.figure(figsize=(6,6))
+plt.scatter(acts, preds, alpha=0.4, s=8)
+plt.plot([0,100],[0,100],'--')
+plt.xlabel("Actual Popularity"); plt.ylabel("Predicted Popularity")
+plt.title("Predicted vs Actual Popularity")
+plt.tight_layout(); plt.savefig(out / "pred_vs_actual.png", dpi=150); plt.close()
+
+top10_genres = df_plot['genre'].dropna().value_counts().head(10).index
+df_top10 = df_plot[df_plot['genre'].isin(top10_genres)]
+
+plt.figure(figsize=(12,6))
+sns.boxplot(x='genre', y='popularity', hue='genre', data=df_top10, palette='Set3', legend=False)
+plt.title("Popularity Distribution by Top 10 Genres")
+plt.xticks(rotation=45, ha='right')
+plt.tight_layout(); plt.savefig(out / "popularity_box_by_genre.png", dpi=150); plt.close()
+
+# Danceability vs Energy colored by genre (Seaborn)
+plt.figure(figsize=(8,6))
+sns.scatterplot(
+    x='danceability', y='energy',
+    hue='genre',
+    data=df_plot[df_plot['genre'].isin(top10_genres)],
+    alpha=0.6, legend='brief'
+)
+plt.title("Danceability vs Energy (Top 10 Genres)")
+plt.legend(bbox_to_anchor=(1.02, 1), loc='upper left')
+plt.tight_layout(); plt.savefig(out / "dance_vs_energy_by_genre.png", dpi=150); plt.close()
+
+# Popularity distribution
 plt.figure(figsize=(8,5))
 plt.hist(df["popularity"], bins=100)
 plt.title("Popularity Distribution (100 bins)")
 plt.xlabel("Popularity"); plt.ylabel("Count")
-plt.tight_layout(); plt.savefig(out/"popularity_hist_100.png"); plt.close()
+plt.tight_layout(); plt.savefig(out / "popularity_hist_100.png", dpi=150); plt.close()
 
+# Tempo distribution
 plt.figure(figsize=(8,5))
 plt.hist(df["tempo"].dropna(), bins=60)
 plt.title("Tempo Distribution")
 plt.xlabel("Tempo (BPM)"); plt.ylabel("Count")
-plt.tight_layout(); plt.savefig(out/"tempo_hist.png"); plt.close()
+plt.tight_layout(); plt.savefig(out / "tempo_hist.png", dpi=150); plt.close()
 
-#Danceability vs Energy
+# Danceability vs Energy (hexbin)
 plt.figure(figsize=(6,6))
 hb = plt.hexbin(df["danceability"], df["energy"], gridsize=40, mincnt=1)
 plt.title("Danceability vs Energy")
 plt.xlabel("Danceability"); plt.ylabel("Energy")
 cb = plt.colorbar(hb); cb.set_label("Count")
-plt.tight_layout(); plt.savefig(out/"danceability_vs_energy_hex.png"); plt.close()
+plt.tight_layout(); plt.savefig(out / "danceability_vs_energy_hex.png", dpi=150); plt.close()
 
-#Correlation heatmap
-num_cols = ["popularity","acousticness","danceability","duration_ms","energy",
-            "instrumentalness","liveness","loudness","speechiness","tempo",
-            "valence","key","mode","time_signature"]
-num_cols = [c for c in num_cols if c in df.columns]
-corr = df[num_cols].corr()
+# Correlation heatmap
+heat_cols = [
+    "popularity","acousticness","danceability","duration_ms","energy",
+    "instrumentalness","liveness","loudness","speechiness","tempo",
+    "valence","mode","time_signature"
+]
+heat_cols = [c for c in heat_cols if c in df.columns]
+corr = df[heat_cols].corr()
 
 plt.figure(figsize=(10,8))
 plt.imshow(corr, aspect="auto")
 plt.title("Correlation Heatmap (numeric features)")
-plt.xticks(range(len(num_cols)), num_cols, rotation=45, ha="right")
-plt.yticks(range(len(num_cols)), num_cols)
+plt.xticks(range(len(heat_cols)), heat_cols, rotation=45, ha="right")
+plt.yticks(range(len(heat_cols)), heat_cols)
 plt.colorbar(label="corr")
-plt.tight_layout(); plt.savefig(out/"correlation_heatmap.png"); plt.close()
-
-# Popularity vs Valence with simple trendline
-x = df["valence"].to_numpy()
-y = df["popularity"].to_numpy()
-mask = ~np.isnan(x) & ~np.isnan(y)
-x, y = x[mask], y[mask]
-
-plt.figure(figsize=(8,6))
-plt.scatter(x, y, alpha=0.3, s=8)
-if len(x) > 1:
-    m, b = np.polyfit(x, y, 1)
-    xs = np.linspace(0, 1, 100)
-    plt.plot(xs, m*xs + b, linestyle="--")
-plt.title("Popularity vs Valence (with trendline)")
-plt.xlabel("Valence"); plt.ylabel("Popularity")
-plt.tight_layout(); plt.savefig(out/"popularity_vs_valence.png"); plt.close()
+plt.tight_layout(); plt.savefig(out / "correlation_heatmap.png", dpi=150); plt.close()
 
 print("Saved figures to:", out.resolve())
