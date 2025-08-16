@@ -63,7 +63,7 @@ y_test_t  = torch.tensor(y_test.reshape(-1, 1),  dtype=torch.float32)
 train_loader = DataLoader(TensorDataset(X_train_t, y_train_t), batch_size=64, shuffle=True)
 test_loader  = DataLoader(TensorDataset(X_test_t,  y_test_t),  batch_size=64, shuffle=False)
 
-#Model
+# Model
 class SpotifyNet(nn.Module):
     def __init__(self, input_size):
         super().__init__()
@@ -180,3 +180,19 @@ plt.colorbar(label="corr")
 plt.tight_layout(); plt.savefig(out / "correlation_heatmap.png", dpi=150); plt.close()
 
 print("Saved figures to:", out.resolve())
+
+plt.figure(figsize=(6,6))
+hb = plt.hexbin(df["loudness"], df["energy"], gridsize=40, mincnt=1)
+plt.title("Loudness vs Energy")
+plt.xlabel("Loudness (dB)")
+plt.ylabel("Energy")
+cb = plt.colorbar(hb); cb.set_label("Count")
+plt.tight_layout(); plt.savefig(out / "loudness_vs_energy.png", dpi=150); plt.close()
+
+avg_pop_by_key = df_plot.groupby("key")["popularity"].mean().sort_values()
+plt.figure(figsize=(10,5))
+avg_pop_by_key.plot(kind="bar", color="skyblue")
+plt.title("Average Popularity by Musical Key")
+plt.xlabel("Key")
+plt.ylabel("Avg Popularity")
+plt.tight_layout(); plt.savefig(out / "avg_popularity_by_key.png", dpi=150); plt.close()
