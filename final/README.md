@@ -21,7 +21,7 @@ https://www.kaggle.com/datasets/zaheenhamidani/ultimate-spotify-tracks-db
 - Linear Regression underperformed, confirming the problem is non-linear.
 - Top 6 models performed very similarly, suggesting the dataset is well-suited for multiple architectures.
 
-## Requirements
+## Technologies Used
 - pandas
 - numpy
 - scikit-learn
